@@ -104,4 +104,61 @@ namespace LSFG_3_1 {
     void waitIdle();
 #endif
 
+    ///
+    /// External device context descriptor for callers that manage their own
+    /// Vulkan instance, physical device, device, and present queue (e.g. Amethyst).
+    ///
+    struct LsfgExternalContextDesc {
+        VkInstance instance = VK_NULL_HANDLE;
+        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+        VkDevice device = VK_NULL_HANDLE;
+        VkQueue queue = VK_NULL_HANDLE;
+        uint32_t queueFamilyIndex = 0;
+        PFN_vkGetInstanceProcAddr getInstanceProcAddr = nullptr;
+        PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
+        bool isHdr = false;
+        float flowScale = 1.0f;
+        uint32_t generationCount = 1;
+        std::function<std::vector<uint8_t>(const std::string&)> shaderLoader;
+    };
+
+    struct LsfgEndpointSlot {
+        VkImage imageC = VK_NULL_HANDLE;
+        VkImageView viewC = VK_NULL_HANDLE;
+        VkImage imageG = VK_NULL_HANDLE;
+        VkImageView viewG = VK_NULL_HANDLE;
+    };
+
+    struct LsfgExternalEndpoints {
+        VkImage imageP = VK_NULL_HANDLE;
+        VkImageView viewP = VK_NULL_HANDLE;
+        uint32_t slotCount = 0;
+        const LsfgEndpointSlot* slots = nullptr;
+    };
+
+    typedef struct LsfgExternalContext* LsfgExternalContextHandle;
+
+    __attribute__((visibility("default")))
+    LsfgExternalContextHandle lsfg_create_context_external(
+        const LsfgExternalContextDesc* desc,
+        const LsfgExternalEndpoints* endpoints,
+        VkExtent2D extent,
+        VkFormat format);
+
+    __attribute__((visibility("default")))
+    void lsfg_destroy_context_external(LsfgExternalContextHandle ctx);
+
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_generation(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex,
+        float interpolationFactor);
+
+    __attribute__((visibility("default")))
+    void lsfg_commit_generation(
+        LsfgExternalContextHandle ctx,
+        uint64_t committedFrameIndex);
+
 }
