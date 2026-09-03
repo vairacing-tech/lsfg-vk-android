@@ -784,24 +784,31 @@ void lsfg_destroy_context_external(LsfgExternalContextHandle ctx) {
     delete ctx;
 }
 
+// record_generation_internal:
+// pMode == 0: R2 stage mode — emits Q0..Q6 (7 timestamps at stage boundaries).
+//             Maximum query index written: 6. Safe for a 9-query pool.
+// pMode == 1: R3 dispatch mode — emits Q0..Q100 (101 timestamps per-dispatch).
+//             Maximum query index written: 100. Requires queryCount >= 103.
+//             (Amethyst adds Q101 and Q102 independently after this returns.)
 static VkResult record_generation_internal(
     LsfgExternalContextHandle ctx,
     VkCommandBuffer cmdBuffer,
     uint32_t slotIndex,
     uint64_t proposedFrameIndex,
     float interpolationFactor,
-    const LsfgStageProfilingInfo* profiling)
+    bool profileActive,
+    VkQueryPool queryPool,
+    uint32_t queryBase,
+    PFN_vkCmdWriteTimestamp cmdWriteTimestamp,
+    int pMode)
 {
     if (ctx == nullptr || !ctx->initialized || ctx->cmdPipelineBarrier == nullptr || ctx->cmdBindPipeline == nullptr || ctx->cmdDispatch == nullptr) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    bool profileActive = (profiling != nullptr && profiling->enabled && profiling->queryPool != VK_NULL_HANDLE && profiling->cmdWriteTimestamp != nullptr);
-    uint32_t qBase = profileActive ? profiling->queryBase : 0;
-    uint32_t pMode = profileActive ? profiling->mode : 0;
     auto emitTimestamp = [&](uint32_t stageOffset) {
-        if (profileActive) {
-            profiling->cmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profiling->queryPool, qBase + stageOffset);
+        if (profileActive && queryPool != VK_NULL_HANDLE && cmdWriteTimestamp != nullptr) {
+            cmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool, queryBase + stageOffset);
         }
     };
 
@@ -949,15 +956,16 @@ static VkResult record_generation_internal(
         ctx->cmdDispatch(cmdBuffer, gx > 0 ? gx : 1, gy > 0 ? gy : 1, 1);
     }
     if (pMode == 1) {
-        emitTimestamp(100);
+        emitTimestamp(100); // Q100: R3 max compute query index
     } else {
-        emitTimestamp(6);
+        emitTimestamp(6);   // Q6:   R2 max compute query index
     }
     // Total compute dispatches = 1 + 28 + 5 + 35 + 30 + 1 = 100 dispatches
 
     return VK_SUCCESS;
 }
 
+// Legacy no-profile entry point (R0 / unprofiled)
 VkResult lsfg_record_generation(
     LsfgExternalContextHandle ctx,
     VkCommandBuffer cmdBuffer,
@@ -965,9 +973,12 @@ VkResult lsfg_record_generation(
     uint64_t proposedFrameIndex,
     float interpolationFactor)
 {
-    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor, nullptr);
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor,
+                                      false, VK_NULL_HANDLE, 0, nullptr, 0);
 }
 
+// R2 stage-profiled entry point. Emits Q0..Q6 only.
+// Maximum compute query index: 6. Binary ABI frozen at 4-field LsfgStageProfilingInfo.
 VkResult lsfg_record_generation_profiled(
     LsfgExternalContextHandle ctx,
     VkCommandBuffer cmdBuffer,
@@ -976,7 +987,37 @@ VkResult lsfg_record_generation_profiled(
     float interpolationFactor,
     const LsfgStageProfilingInfo* profiling)
 {
-    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor, profiling);
+    bool active = (profiling != nullptr && profiling->enabled &&
+                   profiling->queryPool != VK_NULL_HANDLE &&
+                   profiling->cmdWriteTimestamp != nullptr);
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor,
+                                      active,
+                                      active ? profiling->queryPool : VK_NULL_HANDLE,
+                                      active ? profiling->queryBase : 0,
+                                      active ? profiling->cmdWriteTimestamp : nullptr,
+                                      0 /* pMode=0: R2, Q0..Q6 */);
+}
+
+// R3 dispatch-profiled entry point. Emits Q0..Q100 only.
+// Maximum compute query index: 100. Requires queryCount >= 103
+// (Amethyst emits Q101 and Q102 after this returns).
+VkResult lsfg_record_generation_profiled_r3(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex,
+    float interpolationFactor,
+    const LsfgDispatchProfilingInfo* profiling)
+{
+    bool active = (profiling != nullptr && profiling->enabled &&
+                   profiling->queryPool != VK_NULL_HANDLE &&
+                   profiling->cmdWriteTimestamp != nullptr);
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor,
+                                      active,
+                                      active ? profiling->queryPool : VK_NULL_HANDLE,
+                                      active ? profiling->queryBase : 0,
+                                      active ? profiling->cmdWriteTimestamp : nullptr,
+                                      1 /* pMode=1: R3, Q0..Q100 */);
 }
 
 void lsfg_commit_generation(

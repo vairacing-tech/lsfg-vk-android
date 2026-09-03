@@ -148,12 +148,28 @@ namespace LSFG_3_1 {
     __attribute__((visibility("default")))
     void lsfg_destroy_context_external(LsfgExternalContextHandle ctx);
 
+    // R2 public profiling struct — exact binary ABI, never extended.
+    // lsfg_record_generation_profiled emits Q0..Q6 only.
+    // DO NOT add fields here; adding fields would break binary ABI with
+    // pre-compiled R2 callers that pass a pointer to the 4-field layout.
     struct LsfgStageProfilingInfo {
         bool enabled = false;
         VkQueryPool queryPool = VK_NULL_HANDLE;
         uint32_t queryBase = 0;
         PFN_vkCmdWriteTimestamp cmdWriteTimestamp = nullptr;
-        uint32_t mode = 1; // 0: R2 stage mode (Q0..Q6), 1: R3 full dispatch mode (Q0..Q100)
+        // sizeof on arm64: 4 (bool+pad3) + 8 (VkQueryPool ptr) + 4 (queryBase) + 4 (pad) + 8 (fn ptr) = 24 bytes
+        // offsetof: enabled=0, queryPool=8, queryBase=16, cmdWriteTimestamp=24 (total=32 bytes)
+    };
+
+    // R3 dispatch-level profiling struct — separate type for the R3 API.
+    // Identical field layout to LsfgStageProfilingInfo by design so that
+    // existing pool/cmd infrastructure is reused without ABI coupling.
+    // lsfg_record_generation_profiled_r3 emits Q0..Q100 only.
+    struct LsfgDispatchProfilingInfo {
+        bool enabled = false;
+        VkQueryPool queryPool = VK_NULL_HANDLE;
+        uint32_t queryBase = 0;
+        PFN_vkCmdWriteTimestamp cmdWriteTimestamp = nullptr;
     };
 
     __attribute__((visibility("default")))
@@ -164,6 +180,9 @@ namespace LSFG_3_1 {
         uint64_t proposedFrameIndex,
         float interpolationFactor);
 
+    // R2 API: emits Q0..Q6 stage boundaries only.
+    // Maximum compute query index emitted: 6.
+    // Binary ABI frozen at 4-field LsfgStageProfilingInfo.
     __attribute__((visibility("default")))
     VkResult lsfg_record_generation_profiled(
         LsfgExternalContextHandle ctx,
@@ -172,6 +191,19 @@ namespace LSFG_3_1 {
         uint64_t proposedFrameIndex,
         float interpolationFactor,
         const LsfgStageProfilingInfo* profiling);
+
+    // R3 API: emits Q0..Q100 full per-dispatch boundaries only.
+    // Maximum compute query index emitted: 100.
+    // Amethyst then emits Q101 (G->D) and Q102 (D->M) independently.
+    // Query pool must have queryCount >= 103 (Amethyst uses exactly 103).
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_generation_profiled_r3(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex,
+        float interpolationFactor,
+        const LsfgDispatchProfilingInfo* profiling);
 
     __attribute__((visibility("default")))
     void lsfg_commit_generation(
