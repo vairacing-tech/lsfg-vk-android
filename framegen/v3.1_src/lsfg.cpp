@@ -798,6 +798,7 @@ static VkResult record_generation_internal(
 
     bool profileActive = (profiling != nullptr && profiling->enabled && profiling->queryPool != VK_NULL_HANDLE && profiling->cmdWriteTimestamp != nullptr);
     uint32_t qBase = profileActive ? profiling->queryBase : 0;
+    uint32_t pMode = profileActive ? profiling->mode : 0;
     auto emitTimestamp = [&](uint32_t stageOffset) {
         if (profileActive) {
             profiling->cmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profiling->queryPool, qBase + stageOffset);
@@ -862,10 +863,14 @@ static VkResult record_generation_internal(
                 ctx->cmdDispatch(cmdBuffer, (lw + 7) / 8, (lh + 7) / 8, 1);
             }
             emitComputeBarrier();
+            if (pMode == 1) {
+                emitTimestamp(2 + lvl * 4 + p);
+            }
         }
     }
-    // Q2: after Alpha passes and existing terminal barrier
-    emitTimestamp(2);
+    if (pMode == 0) {
+        emitTimestamp(2);
+    }
 
     // Stage 3: Beta passes (5 passes = 5 dispatches)
     uint32_t betaResIds[5] = {275, 276, 277, 278, 279};
@@ -880,9 +885,13 @@ static VkResult record_generation_internal(
             ctx->cmdDispatch(cmdBuffer, (bw + bs - 1) / bs, (bh + bs - 1) / bs, 1);
         }
         emitComputeBarrier();
+        if (pMode == 1) {
+            emitTimestamp(30 + p);
+        }
     }
-    // Q3: after Beta passes and existing terminal barrier
-    emitTimestamp(3);
+    if (pMode == 0) {
+        emitTimestamp(3);
+    }
 
     // Stage 4: Gamma passes (7 levels x 5 passes = 35 dispatches)
     uint32_t gammaResIds[5] = {257, 259, 260, 261, 262};
@@ -897,10 +906,14 @@ static VkResult record_generation_internal(
                 ctx->cmdDispatch(cmdBuffer, (gw + 7) / 8, (gh + 7) / 8, 1);
             }
             emitComputeBarrier();
+            if (pMode == 1) {
+                emitTimestamp(35 + lvl * 5 + p);
+            }
         }
     }
-    // Q4: after Gamma passes and existing terminal barrier
-    emitTimestamp(4);
+    if (pMode == 0) {
+        emitTimestamp(4);
+    }
 
     // Stage 5: Delta passes (3 levels x 10 passes = 30 dispatches)
     uint32_t deltaResIds[10] = {257, 263, 264, 265, 266, 258, 271, 272, 273, 274};
@@ -915,10 +928,14 @@ static VkResult record_generation_internal(
                 ctx->cmdDispatch(cmdBuffer, (dw + 7) / 8, (dh + 7) / 8, 1);
             }
             emitComputeBarrier();
+            if (pMode == 1) {
+                emitTimestamp(70 + lvl * 10 + p);
+            }
         }
     }
-    // Q5: after Delta passes and existing terminal barrier
-    emitTimestamp(5);
+    if (pMode == 0) {
+        emitTimestamp(5);
+    }
 
     // Stage 6: Generate pass (Res 256, 1 dispatch)
     auto itGen = ctx->pipelines.find(256);
@@ -931,8 +948,11 @@ static VkResult record_generation_internal(
         uint32_t gy = (ctx->extent.height + 15) / 16;
         ctx->cmdDispatch(cmdBuffer, gx > 0 ? gx : 1, gy > 0 ? gy : 1, 1);
     }
-    // Q6: immediately after Generate pass
-    emitTimestamp(6);
+    if (pMode == 1) {
+        emitTimestamp(100);
+    } else {
+        emitTimestamp(6);
+    }
     // Total compute dispatches = 1 + 28 + 5 + 35 + 30 + 1 = 100 dispatches
 
     return VK_SUCCESS;

@@ -153,6 +153,7 @@ namespace LSFG_3_1 {
         VkQueryPool queryPool = VK_NULL_HANDLE;
         uint32_t queryBase = 0;
         PFN_vkCmdWriteTimestamp cmdWriteTimestamp = nullptr;
+        uint32_t mode = 1; // 0: R2 stage mode (Q0..Q6), 1: R3 full dispatch mode (Q0..Q100)
     };
 
     __attribute__((visibility("default")))
