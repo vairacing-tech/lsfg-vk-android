@@ -148,6 +148,13 @@ namespace LSFG_3_1 {
     __attribute__((visibility("default")))
     void lsfg_destroy_context_external(LsfgExternalContextHandle ctx);
 
+    struct LsfgStageProfilingInfo {
+        bool enabled = false;
+        VkQueryPool queryPool = VK_NULL_HANDLE;
+        uint32_t queryBase = 0;
+        PFN_vkCmdWriteTimestamp cmdWriteTimestamp = nullptr;
+    };
+
     __attribute__((visibility("default")))
     VkResult lsfg_record_generation(
         LsfgExternalContextHandle ctx,
@@ -155,6 +162,15 @@ namespace LSFG_3_1 {
         uint32_t slotIndex,
         uint64_t proposedFrameIndex,
         float interpolationFactor);
+
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_generation_profiled(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex,
+        float interpolationFactor,
+        const LsfgStageProfilingInfo* profiling);
 
     __attribute__((visibility("default")))
     void lsfg_commit_generation(

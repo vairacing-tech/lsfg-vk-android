@@ -784,16 +784,25 @@ void lsfg_destroy_context_external(LsfgExternalContextHandle ctx) {
     delete ctx;
 }
 
-VkResult lsfg_record_generation(
+static VkResult record_generation_internal(
     LsfgExternalContextHandle ctx,
     VkCommandBuffer cmdBuffer,
     uint32_t slotIndex,
     uint64_t proposedFrameIndex,
-    float interpolationFactor)
+    float interpolationFactor,
+    const LsfgStageProfilingInfo* profiling)
 {
     if (ctx == nullptr || !ctx->initialized || ctx->cmdPipelineBarrier == nullptr || ctx->cmdBindPipeline == nullptr || ctx->cmdDispatch == nullptr) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+
+    bool profileActive = (profiling != nullptr && profiling->enabled && profiling->queryPool != VK_NULL_HANDLE && profiling->cmdWriteTimestamp != nullptr);
+    uint32_t qBase = profileActive ? profiling->queryBase : 0;
+    auto emitTimestamp = [&](uint32_t stageOffset) {
+        if (profileActive) {
+            profiling->cmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, profiling->queryPool, qBase + stageOffset);
+        }
+    };
 
     // 0. Cross-frame memory barrier for persistent scratch/history
     if (ctx->hasCommittedFrame) {
@@ -822,6 +831,9 @@ VkResult lsfg_record_generation(
                                 0, 1, &cb, 0, nullptr, 0, nullptr);
     };
 
+    // Q0: immediately before Mipmaps dispatch
+    emitTimestamp(0);
+
     // Stage 1: Mipmaps pass (Res 255, 1 dispatch)
     auto itMip = ctx->pipelines.find(255);
     if (itMip != ctx->pipelines.end() && itMip->second.pipeline != VK_NULL_HANDLE) {
@@ -834,6 +846,8 @@ VkResult lsfg_record_generation(
         ctx->cmdDispatch(cmdBuffer, gx > 0 ? gx : 1, gy > 0 ? gy : 1, 1);
     }
     emitComputeBarrier();
+    // Q1: after Mipmaps existing terminal barrier
+    emitTimestamp(1);
 
     // Stage 2: Alpha passes (7 levels x 4 passes = 28 dispatches)
     uint32_t alphaResIds[4] = {267, 268, 269, 270};
@@ -850,6 +864,8 @@ VkResult lsfg_record_generation(
             emitComputeBarrier();
         }
     }
+    // Q2: after Alpha passes and existing terminal barrier
+    emitTimestamp(2);
 
     // Stage 3: Beta passes (5 passes = 5 dispatches)
     uint32_t betaResIds[5] = {275, 276, 277, 278, 279};
@@ -865,6 +881,8 @@ VkResult lsfg_record_generation(
         }
         emitComputeBarrier();
     }
+    // Q3: after Beta passes and existing terminal barrier
+    emitTimestamp(3);
 
     // Stage 4: Gamma passes (7 levels x 5 passes = 35 dispatches)
     uint32_t gammaResIds[5] = {257, 259, 260, 261, 262};
@@ -881,6 +899,8 @@ VkResult lsfg_record_generation(
             emitComputeBarrier();
         }
     }
+    // Q4: after Gamma passes and existing terminal barrier
+    emitTimestamp(4);
 
     // Stage 5: Delta passes (3 levels x 10 passes = 30 dispatches)
     uint32_t deltaResIds[10] = {257, 263, 264, 265, 266, 258, 271, 272, 273, 274};
@@ -897,6 +917,8 @@ VkResult lsfg_record_generation(
             emitComputeBarrier();
         }
     }
+    // Q5: after Delta passes and existing terminal barrier
+    emitTimestamp(5);
 
     // Stage 6: Generate pass (Res 256, 1 dispatch)
     auto itGen = ctx->pipelines.find(256);
@@ -909,9 +931,32 @@ VkResult lsfg_record_generation(
         uint32_t gy = (ctx->extent.height + 15) / 16;
         ctx->cmdDispatch(cmdBuffer, gx > 0 ? gx : 1, gy > 0 ? gy : 1, 1);
     }
+    // Q6: immediately after Generate pass
+    emitTimestamp(6);
     // Total compute dispatches = 1 + 28 + 5 + 35 + 30 + 1 = 100 dispatches
 
     return VK_SUCCESS;
+}
+
+VkResult lsfg_record_generation(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex,
+    float interpolationFactor)
+{
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor, nullptr);
+}
+
+VkResult lsfg_record_generation_profiled(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex,
+    float interpolationFactor,
+    const LsfgStageProfilingInfo* profiling)
+{
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor, profiling);
 }
 
 void lsfg_commit_generation(
