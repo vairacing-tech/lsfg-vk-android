@@ -230,6 +230,37 @@ namespace LSFG_3_1 {
         float interpolationFactor,
         const LsfgR4AOptions* options);
 
+    // R4-B experiment options struct — versioned type for R4-B experiment.
+    // deltaL2Bypass: skips Delta L2 (10 dispatches), emits Q90..Q99 as bypass markers.
+    // gammaL6Bypass: skips Gamma L6 (5 dispatches), emits Q65..Q69 as bypass markers.
+    // flowScale: scale factor applied to optical flow field in Generate pass (default 1.0f).
+    // profiling: pointer to dispatch-level profiling info (Q0..Q100).
+    struct LsfgR4BOptions {
+        bool enabled = false;
+        bool deltaL2Bypass = false;
+        bool gammaL6Bypass = false;
+        float flowScale = 1.0f;
+        const LsfgDispatchProfilingInfo* profiling = nullptr;
+    };
+
+    // R4-B API: supports deltaL2Bypass + gammaL6Bypass experiment with configurable flowScale.
+    // When options->gammaL6Bypass is true:
+    // - Gamma L6 (5 dispatches) is skipped (dispatches reduced by 5).
+    // - Q65..Q69 are emitted as explicit BYPASS markers (no dispatches, no new barriers).
+    // When options->deltaL2Bypass is true:
+    // - Delta L2 (10 dispatches) is skipped (dispatches reduced by 10).
+    // - Q90..Q99 are emitted as explicit BYPASS markers (no dispatches, no new barriers).
+    // Total executed compute dispatches with both bypasses: 85 (15 bypassed).
+    // Q0..Q102 query pool availability is fully preserved.
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_generation_profiled_r4b(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex,
+        float interpolationFactor,
+        const LsfgR4BOptions* options);
+
     __attribute__((visibility("default")))
     void lsfg_commit_generation(
         LsfgExternalContextHandle ctx,
