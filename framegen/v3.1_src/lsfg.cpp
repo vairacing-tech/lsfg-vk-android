@@ -153,6 +153,7 @@ struct ExternalPipelineInfo {
 struct ExternalSlotState {
     VkDescriptorSet mipmapsSet = VK_NULL_HANDLE;
     VkDescriptorSet generateSet = VK_NULL_HANDLE;
+    VkDescriptorSet generateSetR4A = VK_NULL_HANDLE;
     VkBuffer constantBuffer = VK_NULL_HANDLE;
     VkDeviceMemory constantBufferMemory = VK_NULL_HANDLE;
 };
@@ -800,7 +801,8 @@ static VkResult record_generation_internal(
     VkQueryPool queryPool,
     uint32_t queryBase,
     PFN_vkCmdWriteTimestamp cmdWriteTimestamp,
-    int pMode)
+    int pMode,
+    bool deltaL2Bypass = false)
 {
     if (ctx == nullptr || !ctx->initialized || ctx->cmdPipelineBarrier == nullptr || ctx->cmdBindPipeline == nullptr || ctx->cmdDispatch == nullptr) {
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -925,6 +927,18 @@ static VkResult record_generation_internal(
     // Stage 5: Delta passes (3 levels x 10 passes = 30 dispatches)
     uint32_t deltaResIds[10] = {257, 263, 264, 265, 266, 258, 271, 272, 273, 274};
     for (int lvl = 0; lvl < 3; ++lvl) {
+        if (deltaL2Bypass && lvl == 2) {
+            // R4-A Delta L2 terminal bypass:
+            // Delta L2 (10 dispatches) is skipped.
+            // Emit Q90..Q99 as explicit BYPASS marker timestamps at this command graph location
+            // with NO dispatches and NO new barriers, preserving the 103-query pool map.
+            if (pMode == 1) {
+                for (int p = 0; p < 10; ++p) {
+                    emitTimestamp(70 + 2 * 10 + p); // Q90..Q99
+                }
+            }
+            break;
+        }
         for (int p = 0; p < 10; ++p) {
             uint32_t resId = deltaResIds[p];
             auto itD = ctx->pipelines.find(resId);
@@ -948,19 +962,24 @@ static VkResult record_generation_internal(
     auto itGen = ctx->pipelines.find(256);
     if (itGen != ctx->pipelines.end() && itGen->second.pipeline != VK_NULL_HANDLE) {
         ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itGen->second.pipeline);
-        if (ctx->slots[slotIndex % 2].generateSet != VK_NULL_HANDLE && ctx->cmdBindDescriptorSets != nullptr) {
-            ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itGen->second.pipelineLayout, 0, 1, &ctx->slots[slotIndex % 2].generateSet, 0, nullptr);
+        VkDescriptorSet genSet = (deltaL2Bypass && ctx->slots[slotIndex % 2].generateSetR4A != VK_NULL_HANDLE)
+            ? ctx->slots[slotIndex % 2].generateSetR4A
+            : ctx->slots[slotIndex % 2].generateSet;
+        if (genSet != VK_NULL_HANDLE && ctx->cmdBindDescriptorSets != nullptr) {
+            ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itGen->second.pipelineLayout, 0, 1, &genSet, 0, nullptr);
         }
         uint32_t gx = (ctx->extent.width + 15) / 16;
         uint32_t gy = (ctx->extent.height + 15) / 16;
         ctx->cmdDispatch(cmdBuffer, gx > 0 ? gx : 1, gy > 0 ? gy : 1, 1);
     }
     if (pMode == 1) {
-        emitTimestamp(100); // Q100: R3 max compute query index
+        emitTimestamp(100); // Q100: R3/R4 max compute query index
     } else {
         emitTimestamp(6);   // Q6:   R2 max compute query index
     }
-    // Total compute dispatches = 1 + 28 + 5 + 35 + 30 + 1 = 100 dispatches
+    // Total compute dispatches:
+    // deltaL2Bypass == false: 1 + 28 + 5 + 35 + 30 + 1 = 100 dispatches
+    // deltaL2Bypass == true:  1 + 28 + 5 + 35 + 20 + 1 = 90 dispatches
 
     return VK_SUCCESS;
 }
@@ -1017,7 +1036,42 @@ VkResult lsfg_record_generation_profiled_r3(
                                       active ? profiling->queryPool : VK_NULL_HANDLE,
                                       active ? profiling->queryBase : 0,
                                       active ? profiling->cmdWriteTimestamp : nullptr,
-                                      1 /* pMode=1: R3, Q0..Q100 */);
+                                      1 /* pMode=1: R3, Q0..Q100 */,
+                                      false /* deltaL2Bypass = false */);
+}
+
+// R4-A dispatch-profiled entry point. Supports deltaL2Bypass experiment.
+VkResult lsfg_record_generation_profiled_r4a(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex,
+    float interpolationFactor,
+    const LsfgR4AOptions* options)
+{
+    bool active = false;
+    VkQueryPool pool = VK_NULL_HANDLE;
+    uint32_t base = 0;
+    PFN_vkCmdWriteTimestamp cmdWrite = nullptr;
+    bool deltaL2Bypass = false;
+
+    if (options != nullptr) {
+        deltaL2Bypass = options->deltaL2Bypass;
+        if (options->profiling != nullptr && options->profiling->enabled &&
+            options->profiling->queryPool != VK_NULL_HANDLE &&
+            options->profiling->cmdWriteTimestamp != nullptr)
+        {
+            active = true;
+            pool = options->profiling->queryPool;
+            base = options->profiling->queryBase;
+            cmdWrite = options->profiling->cmdWriteTimestamp;
+        }
+    }
+
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex, interpolationFactor,
+                                      active, pool, base, cmdWrite,
+                                      1 /* pMode=1: R3/R4, Q0..Q100 */,
+                                      deltaL2Bypass);
 }
 
 void lsfg_commit_generation(

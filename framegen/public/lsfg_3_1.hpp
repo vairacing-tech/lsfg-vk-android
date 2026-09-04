@@ -205,6 +205,31 @@ namespace LSFG_3_1 {
         float interpolationFactor,
         const LsfgDispatchProfilingInfo* profiling);
 
+    // R4-A experiment options struct — versioned type for R4-A experiment.
+    // deltaL2Bypass: skips Delta L2 (10 dispatches), emits Q90..Q99 as bypass markers.
+    // profiling: pointer to dispatch-level profiling info (Q0..Q100).
+    struct LsfgR4AOptions {
+        bool enabled = false;
+        bool deltaL2Bypass = false;
+        const LsfgDispatchProfilingInfo* profiling = nullptr;
+    };
+
+    // R4-A API: supports deltaL2Bypass experiment.
+    // When options->deltaL2Bypass is true:
+    // - Delta L2 (10 dispatches) is skipped (dispatches reduced from 100 to 90).
+    // - Q90..Q99 are emitted as explicit BYPASS markers (no dispatches, no new barriers).
+    // - Q0..Q102 query pool availability is fully preserved.
+    // When options is null or deltaL2Bypass is false:
+    // - Full 100-dispatch execution matching R3.
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_generation_profiled_r4a(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex,
+        float interpolationFactor,
+        const LsfgR4AOptions* options);
+
     __attribute__((visibility("default")))
     void lsfg_commit_generation(
         LsfgExternalContextHandle ctx,
