@@ -173,6 +173,25 @@ namespace LSFG_3_1 {
     };
 
     __attribute__((visibility("default")))
+    VkResult lsfg_record_initialize(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer);
+
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_seed(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t algorithmFrameCount);
+
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_history_only(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t algorithmFrameCount);
+
+    __attribute__((visibility("default")))
     VkResult lsfg_record_generation(
         LsfgExternalContextHandle ctx,
         VkCommandBuffer cmdBuffer,
