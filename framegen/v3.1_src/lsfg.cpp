@@ -2205,6 +2205,12 @@ static VkResult record_generation_internal(
     // Stage 2: Alpha passes (7 levels x 4 passes = 28 dispatches)
     uint32_t alphaResIds[4] = { 267, 268, 269, 270 };
     for (int lvl = 0; lvl < 7; ++lvl) {
+        uint32_t mw = std::max(1u, (ctx->extent.width >> lvl));
+        uint32_t mh = std::max(1u, (ctx->extent.height >> lvl));
+        uint32_t hw = (mw + 1) >> 1;
+        uint32_t hh = (mh + 1) >> 1;
+        uint32_t qw = (hw + 1) >> 1;
+        uint32_t qh = (hh + 1) >> 1;
         for (int p = 0; p < 4; ++p) {
             uint32_t resId = alphaResIds[p];
             auto itA = ctx->pipelines.find(resId);
@@ -2212,9 +2218,9 @@ static VkResult record_generation_internal(
                 ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itA->second.pipeline);
                 VkDescriptorSet aSet = (p < 3) ? slot.alphaSets[lvl][p] : slot.alphaSets[lvl][3 + bank];
                 ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itA->second.pipelineLayout, 0, 1, &aSet, 0, nullptr);
-                uint32_t lw = std::max(1u, (ctx->extent.width >> lvl));
-                uint32_t lh = std::max(1u, (ctx->extent.height >> lvl));
-                ctx->cmdDispatch(cmdBuffer, (lw + 7) / 8, (lh + 7) / 8, 1);
+                uint32_t dw = (p < 2) ? hw : qw;
+                uint32_t dh = (p < 2) ? hh : qh;
+                ctx->cmdDispatch(cmdBuffer, (dw + 7) >> 3, (dh + 7) >> 3, 1);
             }
             emitComputeBarrier();
             if (pMode == 1) {
