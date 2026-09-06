@@ -621,11 +621,6 @@ struct SlotScratchState {
     VkImage deltaOut2[3]{};
     VkImageView deltaOutViews2[3]{};
 
-    // Delta L2 decoupled scratch:
-    // temp3 (2) (R8G8B8A8_UNORM) for Sub-pipeline B at Level 2 (480x270)
-    VkImage deltaTemp3[2]{};
-    VkImageView deltaTempView3[2]{};
-
     // UBO backing buffer
     VkBuffer uboBuffer = VK_NULL_HANDLE;
     VkDeviceMemory uboMemory = VK_NULL_HANDLE;
@@ -1267,16 +1262,6 @@ LsfgExternalContextHandle lsfg_create_context_external(
                          &slot.deltaOut2[dlvl]);
             allGraphImages.push_back(slot.deltaOut2[dlvl]);
         }
-
-        // Delta L2 decoupled scratch (2 images, 480x270, RGBA8)
-        for (int i = 0; i < 2; ++i) {
-            uint32_t dw = kAuthoritativeDeltaExtents[2].width;
-            uint32_t dh = kAuthoritativeDeltaExtents[2].height;
-            create2DImage(ctx, dw, dh,
-                         VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-                         &slot.deltaTemp3[i]);
-            allGraphImages.push_back(slot.deltaTemp3[i]);
-        }
     }
 
     // 5. Backing Memory Suballocation for all 416 Graph Images
@@ -1330,9 +1315,6 @@ LsfgExternalContextHandle lsfg_create_context_external(
             }
             create2DImageView(ctx, slot.deltaOut1[dlvl], VK_FORMAT_R16G16B16A16_SFLOAT, &slot.deltaOutViews1[dlvl]);
             create2DImageView(ctx, slot.deltaOut2[dlvl], VK_FORMAT_R16G16B16A16_SFLOAT, &slot.deltaOutViews2[dlvl]);
-        }
-        for (int i = 0; i < 2; ++i) {
-            create2DImageView(ctx, slot.deltaTemp3[i], VK_FORMAT_R8G8B8A8_UNORM, &slot.deltaTempView3[i]);
         }
     }
 
@@ -1706,8 +1688,8 @@ LsfgExternalContextHandle lsfg_create_context_external(
                 for (int i = 0; i < 4; ++i) batch.addSampledImage(7 + i, ctx->globalAlpha.alphaGlobalOutViews[2 - dlvl][b % 3][i]);
                 batch.addSampledImage(11, prevGamma);
                 batch.addSampledImage(12, prevDelta1);
-                batch.addStorageImage(13, (dlvl == 2) ? slot.deltaTempView3[0] : slot.deltaTempView2[dlvl][0]);
-                batch.addStorageImage(14, (dlvl == 2) ? slot.deltaTempView3[1] : slot.deltaTempView2[dlvl][1]);
+                batch.addStorageImage(13, slot.deltaTempView2[dlvl][0]);
+                batch.addStorageImage(14, slot.deltaTempView2[dlvl][1]);
                 batch.apply();
             }
             // delta[6] (res 271, 5 bindings)
@@ -1716,8 +1698,8 @@ LsfgExternalContextHandle lsfg_create_context_external(
                 slot.deltaSets[dlvl][10] = set;
                 DescriptorWriteBatch batch{ ctx, set, tracker };
                 batch.addSampler(0, ctx->sampler0);
-                batch.addSampledImage(1, (dlvl == 2) ? slot.deltaTempView3[0] : slot.deltaTempView2[dlvl][0]);
-                batch.addSampledImage(2, (dlvl == 2) ? slot.deltaTempView3[1] : slot.deltaTempView2[dlvl][1]);
+                batch.addSampledImage(1, slot.deltaTempView2[dlvl][0]);
+                batch.addSampledImage(2, slot.deltaTempView2[dlvl][1]);
                 batch.addStorageImage(3, slot.deltaTempView1[dlvl][0]);
                 batch.addStorageImage(4, slot.deltaTempView1[dlvl][1]);
                 batch.apply();
@@ -1730,8 +1712,8 @@ LsfgExternalContextHandle lsfg_create_context_external(
                 batch.addSampler(0, ctx->sampler0);
                 batch.addSampledImage(1, slot.deltaTempView1[dlvl][0]);
                 batch.addSampledImage(2, slot.deltaTempView1[dlvl][1]);
-                batch.addStorageImage(3, (dlvl == 2) ? slot.deltaTempView3[0] : slot.deltaTempView2[dlvl][0]);
-                batch.addStorageImage(4, (dlvl == 2) ? slot.deltaTempView3[1] : slot.deltaTempView2[dlvl][1]);
+                batch.addStorageImage(3, slot.deltaTempView2[dlvl][0]);
+                batch.addStorageImage(4, slot.deltaTempView2[dlvl][1]);
                 batch.apply();
             }
             // delta[8] (res 273, 5 bindings)
@@ -1740,8 +1722,8 @@ LsfgExternalContextHandle lsfg_create_context_external(
                 slot.deltaSets[dlvl][12] = set;
                 DescriptorWriteBatch batch{ ctx, set, tracker };
                 batch.addSampler(0, ctx->sampler0);
-                batch.addSampledImage(1, (dlvl == 2) ? slot.deltaTempView3[0] : slot.deltaTempView2[dlvl][0]);
-                batch.addSampledImage(2, (dlvl == 2) ? slot.deltaTempView3[1] : slot.deltaTempView2[dlvl][1]);
+                batch.addSampledImage(1, slot.deltaTempView2[dlvl][0]);
+                batch.addSampledImage(2, slot.deltaTempView2[dlvl][1]);
                 batch.addStorageImage(3, slot.deltaTempView1[dlvl][0]);
                 batch.addStorageImage(4, slot.deltaTempView1[dlvl][1]);
                 batch.apply();
@@ -1868,10 +1850,6 @@ void lsfg_destroy_context_external(LsfgExternalContextHandle ctx)
             if (slot.deltaOutViews2[dlvl]) ctx->destroyImageView(ctx->device, slot.deltaOutViews2[dlvl], nullptr);
             if (slot.deltaOut2[dlvl]) ctx->destroyImage(ctx->device, slot.deltaOut2[dlvl], nullptr);
         }
-        for (int i = 0; i < 2; ++i) {
-            if (slot.deltaTempView3[i]) ctx->destroyImageView(ctx->device, slot.deltaTempView3[i], nullptr);
-            if (slot.deltaTemp3[i]) ctx->destroyImage(ctx->device, slot.deltaTemp3[i], nullptr);
-        }
 
         if (slot.uboMapped) {
             ctx->unmapMemory(ctx->device, slot.uboMemory);
@@ -1976,9 +1954,6 @@ VkResult lsfg_record_initialize(
             }
             addTransition(slot.deltaOut1[dlvl]);
             addTransition(slot.deltaOut2[dlvl]);
-        }
-        for (int i = 0; i < 2; ++i) {
-            addTransition(slot.deltaTemp3[i]);
         }
     }
 
@@ -2329,9 +2304,7 @@ static VkResult record_generation_internal(
 
             ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipelineLayout, 0, 1, &dSet, 0, nullptr);
             ctx->cmdDispatch(cmdBuffer, threadsX, threadsY, 1);
-            if (!(dlvl == 2 && p == 4)) {
-                emitComputeBarrier();
-            }
+            emitComputeBarrier();
             if (pMode == 1) emitTimestamp(70 + dlvl * 10 + p);
         }
     }
