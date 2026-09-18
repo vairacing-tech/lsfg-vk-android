@@ -1754,8 +1754,8 @@ LsfgExternalContextHandle lsfg_create_context_external(
             batch.addBuffer(0, slot.uboBuffer, 3072, sizeof(ConstantBuffer));
             batch.addSampler(1, ctx->sampler0);
             batch.addSampler(2, ctx->sampler2);
-            batch.addSampledImage(3, viewC);
-            batch.addSampledImage(4, viewP);
+            batch.addSampledImage(3, viewP);
+            batch.addSampledImage(4, viewC);
             batch.addSampledImage(5, slot.gammaOutViews[6]);
             batch.addSampledImage(6, slot.deltaOutViews1[2]);
             batch.addSampledImage(7, slot.deltaOutViews2[2]);
