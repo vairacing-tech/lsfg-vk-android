@@ -692,6 +692,7 @@ struct LsfgExternalContext {
     PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets = nullptr;
     PFN_vkCmdDispatch cmdDispatch = nullptr;
     PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
+    PFN_vkCmdUpdateBuffer cmdUpdateBuffer = nullptr;
 
     // Instance query functions
     PFN_vkGetPhysicalDeviceMemoryProperties getPhysicalDeviceMemoryProperties = nullptr;
@@ -1026,6 +1027,7 @@ LsfgExternalContextHandle lsfg_create_context_external(
     LOAD_DEV_FN(cmdBindDescriptorSets, CmdBindDescriptorSets);
     LOAD_DEV_FN(cmdDispatch, CmdDispatch);
     LOAD_DEV_FN(cmdPipelineBarrier, CmdPipelineBarrier);
+    LOAD_DEV_FN(cmdUpdateBuffer, CmdUpdateBuffer);
     #undef LOAD_DEV_FN
 
     // Load instance query functions
@@ -1324,7 +1326,7 @@ LsfgExternalContextHandle lsfg_create_context_external(
         VkBufferCreateInfo bufInfo{};
         bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufInfo.size = 65536;
-        bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ctx->createBuffer(ctx->device, &bufInfo, nullptr, &slot.uboBuffer);
 
@@ -2130,6 +2132,233 @@ VkResult lsfg_record_history_only(
 }
 
 // -----------------------------------------------------------------------------
+// True X3 Split Execution API Implementation
+// -----------------------------------------------------------------------------
+
+void lsfg_update_timestamp(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    float interpolationFactor)
+{
+    if (ctx == nullptr || ctx->cmdUpdateBuffer == nullptr || cmdBuffer == VK_NULL_HANDLE) return;
+    auto& slot = ctx->slots[slotIndex % 2];
+    float t = interpolationFactor;
+
+    // Pre-barrier: Ensure any previous compute reads or transfers to uboBuffer are complete before writing again
+    VkBufferMemoryBarrier preBmb{};
+    preBmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    preBmb.srcAccessMask = VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    preBmb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    preBmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBmb.buffer = slot.uboBuffer;
+    preBmb.offset = 0;
+    preBmb.size = VK_WHOLE_SIZE;
+
+    ctx->cmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 0, nullptr, 1, &preBmb, 0, nullptr);
+
+    // Gamma passes (7 levels: offset = 512 + lvl * 256 + 28)
+    for (int lvl = 0; lvl < 7; ++lvl) {
+        ctx->cmdUpdateBuffer(cmdBuffer, slot.uboBuffer, 512 + lvl * 256 + 28, sizeof(float), &t);
+    }
+    // Delta passes (3 levels: offset = 2304 + dlvl * 256 + 28)
+    for (int dlvl = 0; dlvl < 3; ++dlvl) {
+        ctx->cmdUpdateBuffer(cmdBuffer, slot.uboBuffer, 2304 + dlvl * 256 + 28, sizeof(float), &t);
+    }
+    // Generate pass (offset = 3072 + 28)
+    ctx->cmdUpdateBuffer(cmdBuffer, slot.uboBuffer, 3072 + 28, sizeof(float), &t);
+
+    // Barrier: TRANSFER_WRITE -> COMPUTE_SHADER_READ / UNIFORM_READ
+    VkBufferMemoryBarrier bmb{};
+    bmb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bmb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bmb.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+    bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bmb.buffer = slot.uboBuffer;
+    bmb.offset = 0;
+    bmb.size = VK_WHOLE_SIZE;
+
+    ctx->cmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 0, nullptr, 1, &bmb, 0, nullptr);
+}
+
+VkResult lsfg_record_shared_stages(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex)
+{
+    if (ctx == nullptr || cmdBuffer == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!ctx->temporalBootstrapComplete) {
+        return VK_ERROR_NOT_PERMITTED_EXT;
+    }
+
+    auto& slot = ctx->slots[slotIndex % 2];
+
+    if (ctx->hasCommittedFrame) {
+        VkMemoryBarrier crossFrameBarrier{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+        };
+        ctx->cmdPipelineBarrier(cmdBuffer,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                0, 1, &crossFrameBarrier, 0, nullptr, 0, nullptr);
+    }
+
+    auto emitComputeBarrier = [&]() {
+        VkMemoryBarrier cb{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+        };
+        ctx->cmdPipelineBarrier(cmdBuffer,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                0, 1, &cb, 0, nullptr, 0, nullptr);
+    };
+
+    uint32_t bank = proposedFrameIndex % 3;
+
+    // Stage 1: Mipmaps pass (Res 255, 1 dispatch)
+    ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[255].pipeline);
+    ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[255].pipelineLayout, 0, 1, &slot.mipmapsSet, 0, nullptr);
+    uint32_t gx = (ctx->extent.width + 63) / 64;
+    uint32_t gy = (ctx->extent.height + 63) / 64;
+    ctx->cmdDispatch(cmdBuffer, gx > 0 ? gx : 1, gy > 0 ? gy : 1, 1);
+    emitComputeBarrier();
+
+    // Stage 2: Alpha passes (7 levels x 4 passes = 28 dispatches)
+    uint32_t alphaResIds[4] = { 267, 268, 269, 270 };
+    for (int lvl = 0; lvl < 7; ++lvl) {
+        uint32_t mw = std::max(1u, (ctx->extent.width >> lvl));
+        uint32_t mh = std::max(1u, (ctx->extent.height >> lvl));
+        uint32_t hw = (mw + 1) >> 1;
+        uint32_t hh = (mh + 1) >> 1;
+        uint32_t qw = (hw + 1) >> 1;
+        uint32_t qh = (hh + 1) >> 1;
+        for (int p = 0; p < 4; ++p) {
+            uint32_t resId = alphaResIds[p];
+            auto itA = ctx->pipelines.find(resId);
+            if (itA != ctx->pipelines.end() && itA->second.pipeline != VK_NULL_HANDLE) {
+                ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itA->second.pipeline);
+                VkDescriptorSet aSet = (p < 3) ? slot.alphaSets[lvl][p] : slot.alphaSets[lvl][3 + bank];
+                ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, itA->second.pipelineLayout, 0, 1, &aSet, 0, nullptr);
+                uint32_t dw = (p < 2) ? hw : qw;
+                uint32_t dh = (p < 2) ? hh : qh;
+                ctx->cmdDispatch(cmdBuffer, (dw + 7) >> 3, (dh + 7) >> 3, 1);
+            }
+            emitComputeBarrier();
+        }
+    }
+
+    // Stage 3: Beta passes (5 passes = 5 dispatches)
+    uint32_t betaResIds[5] = { 275, 276, 277, 278, 279 };
+    for (int p = 0; p < 5; ++p) {
+        uint32_t resId = betaResIds[p];
+        ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipeline);
+        VkDescriptorSet bSet = (p == 0) ? slot.betaSets[bank] : slot.betaSets[2 + p];
+        ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipelineLayout, 0, 1, &bSet, 0, nullptr);
+
+        uint32_t bw = std::max(1u, (ctx->extent.width + 3) / 4);
+        uint32_t bh = std::max(1u, (ctx->extent.height + 3) / 4);
+        uint32_t bs = (p == 4) ? 32 : 8;
+        ctx->cmdDispatch(cmdBuffer, (bw + bs - 1) / bs, (bh + bs - 1) / bs, 1);
+        emitComputeBarrier();
+    }
+
+    return VK_SUCCESS;
+}
+
+VkResult lsfg_record_branch_stages(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex,
+    float interpolationFactor)
+{
+    if (ctx == nullptr || cmdBuffer == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    auto& slot = ctx->slots[slotIndex % 2];
+
+    auto emitComputeBarrier = [&]() {
+        VkMemoryBarrier cb{
+            VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            nullptr,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+        };
+        ctx->cmdPipelineBarrier(cmdBuffer,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                0, 1, &cb, 0, nullptr, 0, nullptr);
+    };
+
+    uint32_t bank = proposedFrameIndex % 3;
+
+    // Update UBO timestamp for this branch
+    lsfg_update_timestamp(ctx, cmdBuffer, slotIndex, interpolationFactor);
+
+    // Stage 4: Gamma passes (7 levels x 5 passes = 35 dispatches)
+    uint32_t gammaResIds[5] = { 257, 259, 260, 261, 262 };
+    for (int lvl = 0; lvl < 7; ++lvl) {
+        const auto& ext = kAuthoritativeGammaExtents[lvl];
+        uint32_t threadsX = (ext.width + 7) >> 3;
+        uint32_t threadsY = (ext.height + 7) >> 3;
+
+        for (int p = 0; p < 5; ++p) {
+            uint32_t resId = gammaResIds[p];
+            ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipeline);
+            VkDescriptorSet gSet = (p == 0) ? slot.gammaSets[lvl][bank] : slot.gammaSets[lvl][2 + p];
+            ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipelineLayout, 0, 1, &gSet, 0, nullptr);
+            ctx->cmdDispatch(cmdBuffer, threadsX, threadsY, 1);
+            emitComputeBarrier();
+        }
+    }
+
+    // Stage 5: Delta passes (3 levels x 10 passes = 30 dispatches)
+    uint32_t deltaResIds[10] = { 257, 263, 264, 265, 266, 258, 271, 272, 273, 274 };
+    for (int dlvl = 0; dlvl < 3; ++dlvl) {
+        const auto& ext = kAuthoritativeDeltaExtents[dlvl];
+        uint32_t threadsX = (ext.width + 7) >> 3;
+        uint32_t threadsY = (ext.height + 7) >> 3;
+
+        for (int p = 0; p < 10; ++p) {
+            uint32_t resId = deltaResIds[p];
+            ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipeline);
+            VkDescriptorSet dSet = VK_NULL_HANDLE;
+            if (p == 0) dSet = slot.deltaSets[dlvl][bank];
+            else if (p < 5) dSet = slot.deltaSets[dlvl][2 + p];
+            else if (p == 5) dSet = slot.deltaSets[dlvl][7 + bank];
+            else dSet = slot.deltaSets[dlvl][4 + p];
+
+            ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipelineLayout, 0, 1, &dSet, 0, nullptr);
+            ctx->cmdDispatch(cmdBuffer, threadsX, threadsY, 1);
+            emitComputeBarrier();
+        }
+    }
+
+    // Stage 6: Generate pass (Res 256, 1 dispatch)
+    ctx->cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[256].pipeline);
+    VkDescriptorSet genSet = slot.generateSet;
+    ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[256].pipelineLayout, 0, 1, &genSet, 0, nullptr);
+    uint32_t gxGen = (ctx->extent.width + 15) / 16;
+    uint32_t gyGen = (ctx->extent.height + 15) / 16;
+    ctx->cmdDispatch(cmdBuffer, gxGen > 0 ? gxGen : 1, gyGen > 0 ? gyGen : 1, 1);
+
+    return VK_SUCCESS;
+}
+
+// -----------------------------------------------------------------------------
 // Unified Internal Generation Recording (100 Dispatches Baseline)
 // -----------------------------------------------------------------------------
 
@@ -2300,7 +2529,7 @@ static VkResult record_generation_internal(
             if (p == 0) dSet = slot.deltaSets[dlvl][bank];
             else if (p < 5) dSet = slot.deltaSets[dlvl][2 + p];
             else if (p == 5) dSet = slot.deltaSets[dlvl][7 + bank];
-            else dSet = slot.deltaSets[dlvl][5 + p];
+            else dSet = slot.deltaSets[dlvl][4 + p];
 
             ctx->cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->pipelines[resId].pipelineLayout, 0, 1, &dSet, 0, nullptr);
             ctx->cmdDispatch(cmdBuffer, threadsX, threadsY, 1);

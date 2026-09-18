@@ -285,4 +285,23 @@ namespace LSFG_3_1 {
         LsfgExternalContextHandle ctx,
         uint64_t committedFrameIndex);
 
+    // True X3 Split Execution Entry Points
+    // Shared stages: Mipmaps, Alpha, Beta (executed once per native frame pair)
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_shared_stages(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex);
+
+    // Branch stages: Gamma, Delta, Generate (executed for each interpolation factor t)
+    __attribute__((visibility("default")))
+    VkResult lsfg_record_branch_stages(
+        LsfgExternalContextHandle ctx,
+        VkCommandBuffer cmdBuffer,
+        uint32_t slotIndex,
+        uint64_t proposedFrameIndex,
+        float interpolationFactor);
+
 }
+
