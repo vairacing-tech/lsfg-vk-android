@@ -693,6 +693,7 @@ struct LsfgExternalContext {
     PFN_vkCmdDispatch cmdDispatch = nullptr;
     PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
     PFN_vkCmdUpdateBuffer cmdUpdateBuffer = nullptr;
+    PFN_vkCmdClearColorImage cmdClearColorImage = nullptr;
 
     // Instance query functions
     PFN_vkGetPhysicalDeviceMemoryProperties getPhysicalDeviceMemoryProperties = nullptr;
@@ -1028,6 +1029,7 @@ LsfgExternalContextHandle lsfg_create_context_external(
     LOAD_DEV_FN(cmdDispatch, CmdDispatch);
     LOAD_DEV_FN(cmdPipelineBarrier, CmdPipelineBarrier);
     LOAD_DEV_FN(cmdUpdateBuffer, CmdUpdateBuffer);
+    LOAD_DEV_FN(cmdClearColorImage, CmdClearColorImage);
     #undef LOAD_DEV_FN
 
     // Load instance query functions
@@ -1064,15 +1066,15 @@ LsfgExternalContextHandle lsfg_create_context_external(
         sampInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sampInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sampInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampInfo.compareEnable = VK_TRUE;
-        sampInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+        sampInfo.compareEnable = VK_FALSE;
+        sampInfo.compareOp = VK_COMPARE_OP_NEVER;
         ctx->createSampler(ctx->device, &sampInfo, nullptr, &ctx->sampler2);
     }
 
     // 2. Create Fallback Dummy Images (1x1 R16F and 1x1 R8)
     {
-        create2DImage(ctx, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &ctx->dummyImage);
-        create2DImage(ctx, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &ctx->dummyImageR8);
+        create2DImage(ctx, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &ctx->dummyImage);
+        create2DImage(ctx, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &ctx->dummyImageR8);
 
         std::vector<SuballocationBlock> dummyBlocks;
         allocateAndBindImage(ctx, memProps, dummyBlocks, ctx->dummyImage);
@@ -1612,7 +1614,7 @@ LsfgExternalContextHandle lsfg_create_context_external(
 
         // (e) Delta (3 levels * 14 sets = 42 sets)
         for (int dlvl = 0; dlvl < 3; ++dlvl) {
-            VkImageView prevGamma = (dlvl == 0) ? ctx->dummyImageView : slot.gammaOutViews[3 + dlvl];
+            VkImageView prevGamma = slot.gammaOutViews[3 + dlvl];
             VkImageView prevDelta1 = (dlvl == 0) ? ctx->dummyImageView : slot.deltaOutViews1[dlvl - 1];
             VkImageView prevDelta2 = (dlvl == 0) ? ctx->dummyImageView : slot.deltaOutViews2[dlvl - 1];
 
@@ -1626,7 +1628,7 @@ LsfgExternalContextHandle lsfg_create_context_external(
                 batch.addSampler(2, ctx->sampler2);
                 for (int i = 0; i < 4; ++i) batch.addSampledImage(3 + i, ctx->globalAlpha.alphaGlobalOutViews[2 - dlvl][(b + 2) % 3][i]);
                 for (int i = 0; i < 4; ++i) batch.addSampledImage(7 + i, ctx->globalAlpha.alphaGlobalOutViews[2 - dlvl][b % 3][i]);
-                batch.addSampledImage(11, prevGamma);
+                batch.addSampledImage(11, prevDelta1);
                 batch.addStorageImage(12, slot.deltaTempView1[dlvl][0]);
                 batch.addStorageImage(13, slot.deltaTempView1[dlvl][1]);
                 batch.addStorageImage(14, slot.deltaTempView1[dlvl][2]);
@@ -1673,7 +1675,7 @@ LsfgExternalContextHandle lsfg_create_context_external(
                 batch.addSampler(1, ctx->sampler0);
                 batch.addSampler(2, ctx->sampler2);
                 for (int i = 0; i < 4; ++i) batch.addSampledImage(3 + i, slot.deltaTempView2[dlvl][i]);
-                batch.addSampledImage(7, prevGamma);
+                batch.addSampledImage(7, prevDelta1);
                 batch.addSampledImage(8, slot.betaOutViews[2 - dlvl]);
                 batch.addStorageImage(9, slot.deltaOutViews1[dlvl]);
                 batch.apply();
@@ -1893,6 +1895,9 @@ VkResult lsfg_record_initialize(
     VkCommandBuffer cmdBuffer)
 {
     if (ctx == nullptr || cmdBuffer == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    if (ctx->cmdPipelineBarrier == nullptr || ctx->cmdClearColorImage == nullptr) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     if (ctx->initialLayoutsTransitioned) return VK_SUCCESS;
 
     std::vector<VkImageMemoryBarrier> barriers;
@@ -1959,10 +1964,6 @@ VkResult lsfg_record_initialize(
         }
     }
 
-    // Transition 2 dummy images
-    addTransition(ctx->dummyImage);
-    addTransition(ctx->dummyImageR8);
-
     if (ctx->cmdPipelineBarrier && !barriers.empty()) {
         ctx->cmdPipelineBarrier(
             cmdBuffer,
@@ -1973,6 +1974,81 @@ VkResult lsfg_record_initialize(
             0, nullptr,
             static_cast<uint32_t>(barriers.size()),
             barriers.data());
+    }
+
+    // Explicitly initialize fallback dummy images with defined neutral zero content
+    if (ctx->dummyImage != VK_NULL_HANDLE || ctx->dummyImageR8 != VK_NULL_HANDLE) {
+        VkImage dummyImages[2] = { ctx->dummyImage, ctx->dummyImageR8 };
+        uint32_t dummyCount = 0;
+        VkImage validDummies[2];
+        for (int i = 0; i < 2; ++i) {
+            if (dummyImages[i] != VK_NULL_HANDLE) validDummies[dummyCount++] = dummyImages[i];
+        }
+
+        if (dummyCount > 0 && ctx->cmdPipelineBarrier) {
+            VkImageMemoryBarrier preClearBarriers[2]{};
+            for (uint32_t i = 0; i < dummyCount; ++i) {
+                preClearBarriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                preClearBarriers[i].srcAccessMask = 0;
+                preClearBarriers[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                preClearBarriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                preClearBarriers[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                preClearBarriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                preClearBarriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                preClearBarriers[i].image = validDummies[i];
+                preClearBarriers[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                preClearBarriers[i].subresourceRange.baseMipLevel = 0;
+                preClearBarriers[i].subresourceRange.levelCount = 1;
+                preClearBarriers[i].subresourceRange.baseArrayLayer = 0;
+                preClearBarriers[i].subresourceRange.layerCount = 1;
+            }
+            ctx->cmdPipelineBarrier(
+                cmdBuffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                dummyCount, preClearBarriers);
+
+            if (ctx->cmdClearColorImage) {
+                VkClearColorValue zeroColor{}; // 0.0f
+                VkImageSubresourceRange range{};
+                range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                range.baseMipLevel = 0;
+                range.levelCount = 1;
+                range.baseArrayLayer = 0;
+                range.layerCount = 1;
+                for (uint32_t i = 0; i < dummyCount; ++i) {
+                    ctx->cmdClearColorImage(cmdBuffer, validDummies[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zeroColor, 1, &range);
+                }
+            }
+
+            VkImageMemoryBarrier postClearBarriers[2]{};
+            for (uint32_t i = 0; i < dummyCount; ++i) {
+                postClearBarriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                postClearBarriers[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                postClearBarriers[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                postClearBarriers[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                postClearBarriers[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                postClearBarriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                postClearBarriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                postClearBarriers[i].image = validDummies[i];
+                postClearBarriers[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                postClearBarriers[i].subresourceRange.baseMipLevel = 0;
+                postClearBarriers[i].subresourceRange.levelCount = 1;
+                postClearBarriers[i].subresourceRange.baseArrayLayer = 0;
+                postClearBarriers[i].subresourceRange.layerCount = 1;
+            }
+            ctx->cmdPipelineBarrier(
+                cmdBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                dummyCount, postClearBarriers);
+        }
     }
 
     ctx->initialLayoutsTransitioned = true;
@@ -1991,7 +2067,10 @@ VkResult lsfg_record_seed(
 {
     if (ctx == nullptr || cmdBuffer == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
     if (!ctx->initialLayoutsTransitioned) {
-        lsfg_record_initialize(ctx, cmdBuffer);
+        VkResult initRes = lsfg_record_initialize(ctx, cmdBuffer);
+        if (initRes != VK_SUCCESS || !ctx->initialLayoutsTransitioned) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
     }
 
     auto& slot = ctx->slots[slotIndex % 2];
@@ -2362,6 +2441,15 @@ VkResult lsfg_record_branch_stages(
 // Unified Internal Generation Recording (100 Dispatches Baseline)
 // -----------------------------------------------------------------------------
 
+// Interposer-only diagnostic hook: the X2 monolithic recorder hides the
+// shared-to-M1 boundary. No public LSFG ABI or productive work is changed.
+struct LsfgCostProfilerHook {
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    PFN_vkCmdWriteTimestamp writeTimestamp = nullptr;
+    uint32_t sharedEndQuery = 0;
+    uint32_t m1BeginQuery = 0;
+};
+
 static VkResult record_generation_internal(
     LsfgExternalContextHandle ctx,
     VkCommandBuffer cmdBuffer,
@@ -2374,7 +2462,8 @@ static VkResult record_generation_internal(
     PFN_vkCmdWriteTimestamp cmdWriteTimestamp,
     int pMode,
     bool deltaL2Bypass = false,
-    bool gammaL6Bypass = false)
+    bool gammaL6Bypass = false,
+    const LsfgCostProfilerHook* costHook = nullptr)
 {
     if (ctx == nullptr || cmdBuffer == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
     if (!ctx->temporalBootstrapComplete) {
@@ -2477,6 +2566,19 @@ static VkResult record_generation_internal(
         if (pMode == 1) emitTimestamp(30 + p);
     }
     if (pMode == 0) emitTimestamp(3);
+
+    // Beta's final compute barrier precedes the UBO update and all M1 work.
+    // This exact boundary is invisible to the interposer in monolithic X2.
+    if (costHook != nullptr && costHook->queryPool != VK_NULL_HANDLE &&
+        costHook->writeTimestamp != nullptr) {
+        costHook->writeTimestamp(cmdBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 costHook->queryPool, costHook->sharedEndQuery);
+        costHook->writeTimestamp(cmdBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 costHook->queryPool, costHook->m1BeginQuery);
+    }
+
+    // Apply requested interpolation factor to UBO before consumers (Gamma, Delta, Generate)
+    lsfg_update_timestamp(ctx, cmdBuffer, slotIndex, interpolationFactor);
 
     // Stage 4: Gamma passes (7 levels x 5 passes = 35 dispatches)
     uint32_t gammaResIds[5] = { 257, 259, 260, 261, 262 };
@@ -2614,6 +2716,21 @@ VkResult lsfg_record_generation_profiled_r3(
                                       active ? profiling->cmdWriteTimestamp : nullptr,
                                       1 /* pMode=1: R3, Q0..Q100 */,
                                       false, false);
+}
+
+// Diagnostic-only entry point available to the interposer because it includes
+// this source in the same translation unit. The public LSFG interface is intact.
+static VkResult lsfg_record_generation_cost_profiled(
+    LsfgExternalContextHandle ctx,
+    VkCommandBuffer cmdBuffer,
+    uint32_t slotIndex,
+    uint64_t proposedFrameIndex,
+    float interpolationFactor,
+    const LsfgCostProfilerHook* hook)
+{
+    return record_generation_internal(ctx, cmdBuffer, slotIndex, proposedFrameIndex,
+                                      interpolationFactor, false, VK_NULL_HANDLE,
+                                      0, nullptr, 0, false, false, hook);
 }
 
 VkResult lsfg_record_generation_profiled_r4a(
